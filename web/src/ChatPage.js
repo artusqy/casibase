@@ -13,8 +13,8 @@
 // limitations under the License.
 
 import React from "react";
-import {Button, Drawer, Modal, Spin} from "antd";
-import {BarsOutlined, CloseCircleFilled, MenuFoldOutlined, MenuUnfoldOutlined} from "@ant-design/icons";
+import {Button, Drawer, Modal, Spin, Tooltip} from "antd";
+import {BarsOutlined, CloseCircleFilled, MenuFoldOutlined, MenuUnfoldOutlined, PlusOutlined} from "@ant-design/icons";
 import moment from "moment";
 import * as StoreBackend from "./backend/StoreBackend";
 import ChatMenu from "./ChatMenu";
@@ -718,6 +718,17 @@ class ChatPage extends BaseListPage {
               <div style={{flex: 1}}>
                 <StoreInfoTitle chat={this.state.chat} stores={this.state.stores} onChatUpdated={this.handleChatUpdate} onStoreChange={this.updateStoreAndUrl} autoRead={this.state.autoRead} onUpdateAutoRead={(checked) => this.setState({autoRead: checked})} account={this.props.account} paneCount={this.state.paneCount} onPaneCountChange={(count) => this.setState({paneCount: count})} showPaneControls={true} />
               </div>
+              <Tooltip title={i18next.t("chat:New Chat")}>
+                <Button
+                  type="text"
+                  icon={<PlusOutlined />}
+                  style={{marginRight: "8px"}}
+                  onClick={() => {
+                    const currentStore = this.state.chat ? (this.state.stores || []).find(s => s.name === this.state.chat.store) : undefined;
+                    onAddChat(currentStore || {});
+                  }}
+                />
+              </Tooltip>
             </div>
           )}
 
