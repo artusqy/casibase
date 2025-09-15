@@ -1,0 +1,198 @@
+name: Debug (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_backend_build:
+        description: "Build backend (go build ./...)"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      run_frontend_build:
+        description: "Build frontend (yarn build)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      run_integration:
+        description: "Start server against MySQL and probe HTTP"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      enable_tmate:
+        description: "Open interactive SSH debugging session (tmate)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      go_version:
+        description: "Go version"
+        required: true
+        default: "1.23.6"
+        type: string
+      node_version:
+        description: "Node version"
+        required: true
+        default: "20"
+        type: string
+
+jobs:
+  debug:
+    name: Debug session
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_DATABASE: casibase
+          MYSQL_ROOT_PASSWORD: 123456
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=6
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enable step debug (verbose runner logs)
+        if: ${{ always() }}
+        run: |
+          echo "ACTIONS_STEP_DEBUG=true" >> $GITHUB_ENV
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache-dependency-path: ./go.mod
+
+      - name: Go env
+        run: |
+          go version
+          go env
+
+      - name: Cache frontend deps
+        if: ${{ inputs.run_frontend_build == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/yarn
+            ~/.npm
+            web/node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('web/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Setup Node
+        if: ${{ inputs.run_frontend_build == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'yarn'
+          cache-dependency-path: ./web/yarn.lock
+
+      - name: Backend - tidy and download modules (verbose)
+        if: ${{ inputs.run_backend_build == 'true' || inputs.run_integration == 'true' }}
+        run: |
+          set -euxo pipefail
+          go mod tidy
+          go mod download -x 2>&1 | tee go-download.log
+
+      - name: Backend - compile all packages (no tests)
+        if: ${{ inputs.run_backend_build == 'true' }}
+        run: |
+          set -euxo pipefail
+          # Build all packages to catch compile-time issues early
+          go build -v ./... 2>&1 | tee go-build-all.log
+
+      - name: Backend - build server binary
+        if: ${{ inputs.run_integration == 'true' }}
+        run: |
+          set -euxo pipefail
+          go build -v -o ./server_tmp . 2>&1 | tee go-build-server.log
+
+      - name: Frontend - yarn install and build
+        if: ${{ inputs.run_frontend_build == 'true' }}
+        working-directory: ./web
+        run: |
+          set -euxo pipefail
+          yarn --version
+          yarn install --frozen-lockfile --network-timeout 1000000 2>&1 | tee ../yarn-install.log
+          CI=false yarn run build 2>&1 | tee ../yarn-build.log
+
+      - name: Integration - wait for MySQL healthy
+        if: ${{ inputs.run_integration == 'true' }}
+        run: |
+          set -euxo pipefail
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -u root -p123456 --silent; then
+              echo "MySQL is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become healthy in time" >&2
+          exit 1
+
+      - name: Integration - start server and probe HTTP
+        if: ${{ inputs.run_integration == 'true' }}
+        env:
+          RUNNING_IN_DOCKER: "false"
+        run: |
+          set -euxo pipefail
+
+          # Show current app.conf for visibility
+          echo "----- conf/app.conf -----"
+          sed -n '1,120p' conf/app.conf || true
+          echo "-------------------------"
+
+          # Start server in the background
+          nohup ./server_tmp --createDatabase=true > server.log 2>&1 &
+          echo $! > server.pid
+
+          # Wait for HTTP to be ready (default port 14000 from conf/app.conf)
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:14000/swagger/" >/dev/null; then
+              echo "HTTP probe OK at /swagger/"
+              break
+            fi
+            sleep 2
+          done
+
+          # Try home page as well
+          curl -sS "http://127.0.0.1:14000/" | head -n 20 || true
+
+          # Tail last 200 lines for context
+          echo "----- server.log (tail) -----"
+          tail -n 200 server.log || true
+
+          # Stop server
+          kill "$(cat server.pid)" || true
+
+      - name: Upload debug artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts-${{ github.run_id }}
+          path: |
+            go-download.log
+            go-build-all.log
+            go-build-server.log
+            yarn-install.log
+            yarn-build.log
+            server.log
+            server.pid
+          if-no-files-found: warn
+
+      - name: Start tmate session
+        if: ${{ inputs.enable_tmate == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
